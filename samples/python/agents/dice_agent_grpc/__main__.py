@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 
 import asyncclick as click
 import grpc
@@ -27,7 +28,7 @@ from starlette.routing import Route
 
 load_dotenv()
 
-logging.basicConfig()
+logging.basicConfig(level=logging.INFO)
 
 
 @click.command()
@@ -47,16 +48,33 @@ async def main(host: str, port: int, agent_card_port: int) -> None:
 
     agent_card = get_agent_card(host, port)
 
-    # create http server for serving agent card
-    http_server = create_agent_card_server(agent_card, host, agent_card_port)
-
     # Create gRPC server
     grpc_server = await create_grpc_server(agent_card, host, port)
 
-    await asyncio.gather(grpc_server.start(), http_server.serve())
+    # gRPC server cannot serve the public agent card at well-known url.
+    # we need a http serve that serves the public agent card and clients 
+    # can use this as entry point for discovering gRPC endpoint
 
-    await grpc_server.wait_for_termination()
-    await http_server.shutdown()
+    # create http server for serving agent card
+    http_server = create_agent_card_server(agent_card, host, agent_card_port)
+
+    loop = asyncio.get_running_loop()
+
+    async def shutdown(sig: signal.Signals) -> None:
+        """Gracefully shutdown the servers."""
+        logging.warning(f'Received exit signal {sig.name}...')
+        # Uvicorn server shutdown
+        http_server.should_exit = True
+
+        await grpc_server.stop(5)
+        logging.warning('Servers stopped.')
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s)))
+
+    await grpc_server.start()
+
+    await asyncio.gather(http_server.serve(), grpc_server.wait_for_termination())
 
 
 def create_agent_card_server(agent_card: AgentCard, host: str, agent_card_port: int) -> uvicorn.Server:
@@ -78,7 +96,7 @@ def create_agent_card_server(agent_card: AgentCard, host: str, agent_card_port: 
         port=agent_card_port,
         log_config=None,
     )
-    print(f'Starting HTTP server on port {agent_card_port}')
+    logging.info(f'Starting HTTP server on port {agent_card_port}')
     return uvicorn.Server(config)
 
 
@@ -100,10 +118,10 @@ async def create_grpc_server(agent_card: AgentCard, host: str, port: int) -> grp
     )
     reflection.enable_server_reflection(SERVICE_NAMES, server)
     server.add_insecure_port(f'{host}:{port}')
-    print(f'Starting gRPC server on port {port}')
+    logging.info(f'Starting gRPC server on port {port}')
     return server
 
-def get_agent_card(host, port) -> AgentCard:
+def get_agent_card(host: str, port: int) -> AgentCard:
     """Returns the agent card."""
     skills = [
         AgentSkill(

@@ -3,8 +3,9 @@ import logging  # Import the logging module
 from uuid import uuid4
 
 import grpc
+import httpx
 
-from a2a.client import A2AGrpcClient
+from a2a.client import A2ACardResolver, A2AGrpcClient
 from a2a.grpc import a2a_pb2, a2a_pb2_grpc
 from a2a.types import (
     AgentCard,
@@ -15,14 +16,16 @@ from a2a.types import (
     TextPart,
 )
 from a2a.utils import proto_utils
-from a2a.client import A2ACardResolver
-import httpx
+
+
+logging.basicConfig(level=logging.INFO)
 
 async def main() -> None:
     # Configure logging to show INFO level messages
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)  # Get a logger instance
 
+    # base_url is the location for the base agent_card being served by http server
     base_url = 'http://localhost:11000'
 
     agent_card: AgentCard | None = None
@@ -31,6 +34,7 @@ async def main() -> None:
             httpx_client=httpx_client,
             base_url=base_url,
         )
+        #fetch the base agent card
         agent_card = await resolver.get_agent_card()
 
     if not agent_card:
@@ -41,6 +45,9 @@ async def main() -> None:
     async with grpc.aio.insecure_channel(agent_card.url) as channel:
         stub = a2a_pb2_grpc.A2AServiceStub(channel)
 
+        # if the base agent card has authenticated_extended_card flag set
+        # use the gRPC channel to get the authenticated agent card
+        # use the authenticated agent card for interacting with the gRPC service
         if agent_card.supports_authenticated_extended_card:
             try:
                 logger.info(
@@ -53,7 +60,7 @@ async def main() -> None:
                     proto_card
                 )
             except Exception as e:
-                logging.error('Failed to get agent card ', e)
+                logging.error('Failed to get authenticated agent card. Exiting.', e)
                 return
 
 
@@ -69,12 +76,12 @@ async def main() -> None:
         )
 
         response = await client.send_message(request)
-        print(response.model_dump(mode='json', exclude_none=True))
+        logging.info(response.model_dump(mode='json', exclude_none=True))
 
         stream_response = client.send_message_streaming(request)
 
         async for chunk in stream_response:
-            print(chunk.model_dump(mode='json', exclude_none=True))
+            logging.info(chunk.model_dump(mode='json', exclude_none=True))
 
 
 if __name__ == '__main__':
