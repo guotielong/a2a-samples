@@ -51,9 +51,9 @@ async def main(host: str, port: int, agent_card_port: int) -> None:
     # Create gRPC server
     grpc_server = await create_grpc_server(agent_card, host, port)
 
-    # gRPC server cannot serve the public agent card at well-known url.
-    # we need a http serve that serves the public agent card and clients 
-    # can use this as entry point for discovering gRPC endpoint
+    # The gRPC server cannot serve the public agent card at the well-known URL.
+    # A separate HTTP server is needed to serve the public agent card, which clients
+    # can use as an entry point for discovering the gRPC endpoint.
 
     # create http server for serving agent card
     http_server = create_agent_card_server(agent_card, host, agent_card_port)

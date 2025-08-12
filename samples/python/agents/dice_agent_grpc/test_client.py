@@ -18,8 +18,6 @@ from a2a.types import (
 from a2a.utils import proto_utils
 
 
-logging.basicConfig(level=logging.INFO)
-
 async def main() -> None:
     # Configure logging to show INFO level messages
     logging.basicConfig(level=logging.INFO)
@@ -34,7 +32,7 @@ async def main() -> None:
             httpx_client=httpx_client,
             base_url=base_url,
         )
-        #fetch the base agent card
+        # Fetch the base agent card
         agent_card = await resolver.get_agent_card()
 
     if not agent_card:
@@ -60,7 +58,7 @@ async def main() -> None:
                     proto_card
                 )
             except Exception as e:
-                logging.error('Failed to get authenticated agent card. Exiting.', e)
+                logging.exception('Failed to get authenticated agent card. Exiting.')
                 return
 
 
