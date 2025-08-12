@@ -57,7 +57,7 @@ async def main() -> None:
                 final_agent_card_to_use = proto_utils.FromProto.agent_card(
                     proto_card
                 )
-            except Exception as e:
+            except Exception:
                 logging.exception('Failed to get authenticated agent card. Exiting.')
                 return
 
