@@ -15,33 +15,47 @@ from a2a.types import (
     TextPart,
 )
 from a2a.utils import proto_utils
-
+from a2a.client import A2ACardResolver
+import httpx
 
 async def main() -> None:
     # Configure logging to show INFO level messages
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)  # Get a logger instance
 
-    base_url = '[::]:11001'
+    base_url = 'http://localhost:11000'
 
-    async with grpc.aio.insecure_channel(base_url) as channel:
+    agent_card: AgentCard | None = None
+    async with httpx.AsyncClient() as httpx_client:
+        resolver = A2ACardResolver(
+            httpx_client=httpx_client,
+            base_url=base_url,
+        )
+        agent_card = await resolver.get_agent_card()
+
+    if not agent_card:
+        raise ValueError('Agent card not found')
+
+    final_agent_card_to_use = agent_card
+
+    async with grpc.aio.insecure_channel(agent_card.url) as channel:
         stub = a2a_pb2_grpc.A2AServiceStub(channel)
-        # Fetch Public Agent Card and Initialize Client
-        final_agent_card_to_use: AgentCard | None = None
 
-        try:
-            logger.info(
-                'Attempting to fetch public agent card from grpc endpoint'
-            )
-            proto_card = await stub.GetAgentCard(a2a_pb2.GetAgentCardRequest())
-            logger.info('Successfully fetched agent card:')
-            logger.info(proto_card)
-            final_agent_card_to_use = proto_utils.FromProto.agent_card(
-                proto_card
-            )
-        except Exception as e:
-            logging.error('Failed to get agent card ', e)
-            return
+        if agent_card.supports_authenticated_extended_card:
+            try:
+                logger.info(
+                    'Attempting to fetch authenticated agent card from grpc endpoint'
+                )
+                proto_card = await stub.GetAgentCard(a2a_pb2.GetAgentCardRequest())
+                logger.info('Successfully fetched agent card:')
+                logger.info(proto_card)
+                final_agent_card_to_use = proto_utils.FromProto.agent_card(
+                    proto_card
+                )
+            except Exception as e:
+                logging.error('Failed to get agent card ', e)
+                return
+
 
         client = A2AGrpcClient(stub, agent_card=final_agent_card_to_use)
         logger.info('A2AClient initialized.')
