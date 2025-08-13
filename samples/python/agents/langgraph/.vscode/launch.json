@@ -12,7 +12,7 @@
         "PYTHONPATH": "${workspaceFolder}"
       },
       "cwd": "${workspaceFolder}",
-      "args": ["--host", "localhost", "--port", "10000"]
+      "args": ["--host", "localhost", "--port", "10001"]
     }
   ]
 }

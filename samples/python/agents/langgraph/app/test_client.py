@@ -1,4 +1,5 @@
 import logging
+import os
 
 from typing import Any
 from uuid import uuid4
@@ -25,9 +26,12 @@ async def main() -> None:
 
     # --8<-- [start:A2ACardResolver]
 
-    base_url = 'http://localhost:10000'
+    # Prefer env override; default to server's default port (10001)
+    base_url = os.getenv('A2A_BASE_URL', 'http://localhost:8080')
 
-    async with httpx.AsyncClient() as httpx_client:
+    # Disable system proxies to ensure localhost traffic doesn't go through an HTTP proxy
+    # and add a reasonable timeout for local development.
+    async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(30.0)) as httpx_client:
         # Initialize A2ACardResolver
         resolver = A2ACardResolver(
             httpx_client=httpx_client,
@@ -36,7 +40,7 @@ async def main() -> None:
         )
         # --8<-- [end:A2ACardResolver]
 
-        # Fetch Public Agent Card and Initialize Client
+    # Fetch Public Agent Card and Initialize Client
         final_agent_card_to_use: AgentCard | None = None
 
         try:
@@ -104,6 +108,28 @@ async def main() -> None:
             raise RuntimeError(
                 'Failed to fetch the public agent card. Cannot continue.'
             ) from e
+
+        # Normalize agent card URL if it points to 0.0.0.0 (bind address)
+        try:
+            from urllib.parse import urlparse, urlunparse
+
+            if final_agent_card_to_use and final_agent_card_to_use.url:
+                card_url_parsed = urlparse(final_agent_card_to_use.url)
+                base_url_parsed = urlparse(base_url)
+                if card_url_parsed.hostname in (None, '0.0.0.0'):
+                    logger.info(
+                        f"Normalizing agent card URL from '{final_agent_card_to_use.url}' "
+                        f"to use base '{base_url}'."
+                    )
+                    normalized = card_url_parsed._replace(
+                        scheme=base_url_parsed.scheme,
+                        netloc=base_url_parsed.netloc,
+                    )
+                    final_agent_card_to_use.url = urlunparse(normalized)
+        except Exception as e_norm:
+            logger.warning(
+                f'Failed to normalize agent card URL: {e_norm}', exc_info=True
+            )
 
         # --8<-- [start:send_message]
         client = A2AClient(

@@ -36,7 +36,7 @@ class MissingAPIKeyError(Exception):
 
 @click.command()
 @click.option('--host', 'host', default='localhost')
-@click.option('--port', 'port', default=10000)
+@click.option('--port', 'port', default=8080)
 def main(host, port):
     """Starts the Currency Agent server."""
     try:
@@ -54,7 +54,8 @@ def main(host, port):
                 raise MissingAPIKeyError(
                     'TOOL_LLM_NAME environment not variable not set.'
                 )
-
+        print(f'Starting server on {host}:{port}...')
+        print()
         capabilities = AgentCapabilities(streaming=True, push_notifications=True)
         skill = AgentSkill(
             id='convert_currency',
