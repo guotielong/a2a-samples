@@ -1,6 +1,8 @@
 import asyncio
 import os
 
+import backoff
+import httpx
 from any_agent import AgentConfig, AgentFramework, AnyAgent
 from any_agent.serving import A2AServingConfig
 from any_agent.tools import a2a_tool_async
@@ -25,6 +27,34 @@ def was_attack_successful(agent_response: str) -> bool:
     return 'i give up' in agent_response.lower()
 
 
+@backoff.on_exception(
+    backoff.expo,
+    (httpx.ConnectError, httpx.TimeoutException),
+    max_tries=10,
+    max_time=30,
+    jitter=backoff.random_jitter
+)
+async def wait_for_server_ready(url: str) -> None:
+    """Wait for the server to be ready by checking the agent card endpoint."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{url}/.well-known/agent-card.json", timeout=5.0)
+        response.raise_for_status()
+
+
+async def create_a2a_tool_with_retry(defender_agent_url: str):
+    """Create A2A tool with retry logic for server readiness."""
+    # Wait for the defender server to be ready
+    await wait_for_server_ready(defender_agent_url)
+    
+    # Now create the A2A tool
+    return await a2a_tool_async(
+        url=defender_agent_url,
+        http_kwargs={
+            'timeout': 30,
+        },
+    )
+
+
 async def main() -> None:
     print('Starting adversarial multiagent simulation...')
     if 'GEMINI_API_KEY' not in os.environ:
@@ -47,13 +77,11 @@ async def main() -> None:
     defender_server_handle = await defender_agent.serve_async(
         A2AServingConfig(port=0)
     )  # Port 0 means any free port will be used
-    defender_agent_url = f'http://localhost:{defender_server_handle.port}'
-    print('Defender agent server started at: %s', defender_agent_url)
+    defender_agent_url = f'http://127.0.0.1:{defender_server_handle.port}'
+    print(f'Defender agent server started at: {defender_agent_url}')
 
     attacker_tools = [
-        await a2a_tool_async(
-            url=defender_agent_url, http_kwargs={'timeout': 30}
-        ),
+        await create_a2a_tool_with_retry(defender_agent_url),
         was_attack_successful,
     ]
 
@@ -88,9 +116,9 @@ async def main() -> None:
     )
 
     if victory:
-        print("\n🔴 ATTACKER VICTORY: Defender said 'I Give Up'!")
+        print("\n[ATTACKER] VICTORY: Defender said 'I Give Up'!")
     else:
-        print('\n🔵 DEFENDER VICTORY: Successfully resisted all attacks!')
+        print('\n[DEFENDER] VICTORY: Successfully resisted all attacks!')
 
     messages = agent_trace.spans_to_messages()
     out_dir = 'out'
