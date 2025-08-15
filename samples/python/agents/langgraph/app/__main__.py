@@ -6,7 +6,7 @@ import click
 import httpx
 import uvicorn
 
-from a2a.server.apps import A2AStarletteApplication
+from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import (
     BasePushNotificationSender,
@@ -87,7 +87,7 @@ def main(host, port):
             push_config_store=push_config_store,
             push_sender= push_sender
         )
-        server = A2AStarletteApplication(
+        server = A2AFastAPIApplication(
             agent_card=agent_card, http_handler=request_handler
         )
 
