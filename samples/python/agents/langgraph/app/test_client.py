@@ -1,17 +1,15 @@
 import logging
 import os
 
-from typing import Any
 from uuid import uuid4
 
 import httpx
 
-from a2a.client import A2ACardResolver, A2AClient
+from a2a.client import A2ACardResolver, ClientFactory
+
 from a2a.types import (
     AgentCard,
-    MessageSendParams,
-    SendMessageRequest,
-    SendStreamingMessageRequest,
+    Message,
 )
 from a2a.utils.constants import (
     AGENT_CARD_WELL_KNOWN_PATH,
@@ -132,81 +130,107 @@ async def main() -> None:
             )
 
         # --8<-- [start:send_message]
-        client = A2AClient(
-            httpx_client=httpx_client, agent_card=final_agent_card_to_use
-        )
-        logger.info('A2AClient initialized.')
+        # Initialize client using ClientFactory
+        from a2a.client import ClientConfig
+        config = ClientConfig()
+        factory = ClientFactory(config)
+        # Create client with card parameter
+        client = factory.create(card=final_agent_card_to_use)
+        logger.info('Client initialized successfully using ClientFactory.')
 
-        send_message_payload: dict[str, Any] = {
-            'message': {
-                'role': 'user',
-                'parts': [
-                    {'kind': 'text', 'text': 'how much is 10 USD in INR?'}
-                ],
-                'message_id': uuid4().hex,
-            },
-        }
-        request = SendMessageRequest(
-            id=str(uuid4()), params=MessageSendParams(**send_message_payload)
+        # Use the ClientFactory client API
+        message = Message(
+            role='user',
+            parts=[{'kind': 'text', 'text': 'how much is 10 USD in INR?'}],
+            message_id=uuid4().hex,
         )
-
-        response = await client.send_message(request)
-        print(response.model_dump(mode='json', exclude_none=True))
+        async for response_tuple in client.send_message(message):
+            # ClientFactory client returns tuples, extract the actual response
+            if isinstance(response_tuple, tuple) and len(response_tuple) > 0:
+                response = response_tuple[0]  # Get the first element of the tuple
+                if hasattr(response, 'model_dump'):
+                    print(response.model_dump(mode='json', exclude_none=True))
+                else:
+                    print(response)  # Fallback to direct print
+            else:
+                print(response_tuple)  # Fallback to direct print
+            break  # Get the first (and likely only) response for non-streaming
         # --8<-- [end:send_message]
 
         # --8<-- [start:Multiturn]
-        send_message_payload_multiturn: dict[str, Any] = {
-            'message': {
-                'role': 'user',
-                'parts': [
-                    {
-                        'kind': 'text',
-                        'text': 'How much is the exchange rate for 1 USD?',
-                    }
-                ],
-                'message_id': uuid4().hex,
-            },
-        }
-        request = SendMessageRequest(
-            id=str(uuid4()),
-            params=MessageSendParams(**send_message_payload_multiturn),
+        # Use the ClientFactory client API for first multiturn message
+        task_id = None
+        context_id = None
+        
+        multiturn_message = Message(
+            role='user',
+            parts=[{'kind': 'text', 'text': 'How much is the exchange rate for 1 USD?'}],
+            message_id=uuid4().hex,
         )
+        async for response_tuple in client.send_message(multiturn_message):
+            # ClientFactory client returns tuples, extract the actual response
+            if isinstance(response_tuple, tuple) and len(response_tuple) > 0:
+                response = response_tuple[0]  # Get the first element of the tuple
+                if hasattr(response, 'model_dump'):
+                    print(response.model_dump(mode='json', exclude_none=True))
+                    # Extract task_id and context_id from response
+                    if hasattr(response, 'id'):
+                        task_id = response.id
+                    if hasattr(response, 'context_id'):
+                        context_id = response.context_id
+                    elif hasattr(response, 'contextId'):
+                        context_id = response.contextId
+                else:
+                    print(response)  # Fallback to direct print
+                    # Try to extract IDs from dict-like response
+                    if isinstance(response, dict):
+                        task_id = response.get('id')
+                        context_id = response.get('contextId') or response.get('context_id')
+            else:
+                response = response_tuple
+                print(response_tuple)  # Fallback to direct print
+            break  # Get the first response
 
-        response = await client.send_message(request)
-        print(response.model_dump(mode='json', exclude_none=True))
-
-        task_id = response.root.result.id
-        context_id = response.root.result.context_id
-
-        second_send_message_payload_multiturn: dict[str, Any] = {
-            'message': {
-                'role': 'user',
-                'parts': [{'kind': 'text', 'text': 'CAD'}],
-                'message_id': uuid4().hex,
-                'task_id': task_id,
-                'context_id': context_id,
-            },
-        }
-
-        second_request = SendMessageRequest(
-            id=str(uuid4()),
-            params=MessageSendParams(**second_send_message_payload_multiturn),
+        # Use the ClientFactory client API for second multiturn message
+        second_multiturn_message = Message(
+            role='user',
+            parts=[{'kind': 'text', 'text': 'CAD'}],
+            message_id=uuid4().hex,
+            task_id=task_id,
+            context_id=context_id,
         )
-
-        second_response = await client.send_message(second_request)
-        print(second_response.model_dump(mode='json', exclude_none=True))
+        async for response_tuple in client.send_message(second_multiturn_message):
+            # ClientFactory client returns tuples, extract the actual response
+            if isinstance(response_tuple, tuple) and len(response_tuple) > 0:
+                second_response = response_tuple[0]  # Get the first element of the tuple
+                if hasattr(second_response, 'model_dump'):
+                    print(second_response.model_dump(mode='json', exclude_none=True))
+                else:
+                    print(second_response)  # Fallback to direct print
+            else:
+                print(response_tuple)  # Fallback to direct print
+            break  # Get the first response
         # --8<-- [end:Multiturn]
 
         # --8<-- [start:send_message_streaming]
-
-        streaming_request = SendStreamingMessageRequest(
-            id=str(uuid4()), params=MessageSendParams(**send_message_payload)
+        
+        # Use the ClientFactory client API for streaming
+        # For ClientFactory client, send_message already returns an async generator (streaming)
+        streaming_message = Message(
+            role='user',
+            parts=[{'kind': 'text', 'text': 'how much is 10 USD in INR?'}],
+            message_id=uuid4().hex,
         )
-
-        stream_response = client.send_message_streaming(streaming_request)
-
-        async for chunk in stream_response:
-            print(chunk.model_dump(mode='json', exclude_none=True))
+        async for response_tuple in client.send_message(streaming_message):
+            # ClientFactory client returns tuples, extract the actual response
+            if isinstance(response_tuple, tuple) and len(response_tuple) > 0:
+                chunk = response_tuple[0]  # Get the first element of the tuple
+                if hasattr(chunk, 'model_dump'):
+                    print(chunk.model_dump(mode='json', exclude_none=True))
+                else:
+                    print(chunk)  # Fallback to direct print
+            else:
+                print(response_tuple)  # Fallback to direct print
         # --8<-- [end:send_message_streaming]
 
 

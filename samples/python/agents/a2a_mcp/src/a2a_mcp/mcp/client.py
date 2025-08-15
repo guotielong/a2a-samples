@@ -46,6 +46,7 @@ async def init_session(host, port, transport):
     """
     if transport == 'sse':
         url = f'http://{host}:{port}/sse'
+        print(f'Connecting to MCP server at {url}')
         async with sse_client(url) as (read_stream, write_stream):
             async with ClientSession(
                 read_stream=read_stream, write_stream=write_stream
@@ -96,6 +97,89 @@ async def find_agent(session: ClientSession, query) -> CallToolResult:
             'query': query,
         },
     )
+
+
+def _extract_json_from_call(result: CallToolResult):  # type: ignore
+    """Best-effort extraction of JSON/dict data from a CallToolResult.
+
+    Handles the following cases gracefully:
+    - content entry already a JSON-serializable dict
+    - content.text contains valid JSON
+    - empty or whitespace-only content -> returns None
+    Logs warnings instead of raising to avoid cascading failures.
+    """
+    try:
+        if not result.content:
+            logger.warning('CallToolResult has no content entries')
+            return None
+        first = result.content[0]
+        # Some MCP libs may attach already parsed objects under .data or .json
+        if hasattr(first, 'json'):  # type: ignore[attr-defined]
+            json_attr = getattr(first, 'json')
+            if callable(json_attr):
+                try:
+                    return json_attr()
+                except Exception:
+                    logger.warning('Failed to call json() method', exc_info=True)
+            elif json_attr:
+                return json_attr
+        # Check for model_dump_json method (newer Pydantic)
+        if hasattr(first, 'model_dump_json'):  # type: ignore[attr-defined]
+            try:
+                return getattr(first, 'model_dump_json')()
+            except Exception:
+                logger.warning('Failed to call model_dump_json() method', exc_info=True)
+        text = getattr(first, 'text', None)
+        if text is None:
+            logger.warning('First content entry has no text attribute')
+            return None
+        if isinstance(text, (dict, list)):
+            return text
+        if not isinstance(text, str):
+            logger.warning(f'Unexpected content.text type {type(text)}')
+            return None
+        stripped = text.strip()
+        if not stripped:
+            logger.warning('Content text is empty after stripping')
+            return None
+        # If it already looks like JSON try to parse
+        if stripped[0] in '{[':
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                logger.error('Failed to decode JSON from tool result text', exc_info=True)
+                return None
+        # Otherwise return raw text
+        return stripped
+    except Exception:
+        logger.error('Unexpected error extracting JSON from call result', exc_info=True)
+        return None
+
+
+def _extract_json_from_resource(result: ReadResourceResult):  # type: ignore
+    try:
+        if not result.contents:
+            logger.warning('ReadResourceResult has no contents entries')
+            return None
+        first = result.contents[0]
+        text = getattr(first, 'text', None)
+        if isinstance(text, (dict, list)):
+            return text
+        if not isinstance(text, str):
+            return None
+        stripped = text.strip()
+        if not stripped:
+            return None
+        if stripped[0] in '{[':
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                logger.error('Failed to decode JSON from resource result text', exc_info=True)
+                return None
+        return stripped
+    except Exception:
+        logger.error('Unexpected error extracting JSON from resource result', exc_info=True)
+        return None
 
 
 async def find_resource(session: ClientSession, resource) -> ReadResourceResult:
@@ -195,33 +279,47 @@ async def main(host, port, transport, query, resource, tool):
     async with init_session(host, port, transport) as session:
         if query:
             result = await find_agent(session, query)
-            data = json.loads(result.content[0].text)
-            logger.info(json.dumps(data, indent=2))
+            data = _extract_json_from_call(result)
+            try:
+                logger.info(json.dumps(data, indent=2) if data is not None else data)
+            except TypeError as e:
+                logger.error(f'Failed to serialize data to JSON: {e}')
+                logger.info(f'Raw data: {data}')
         if resource:
             result = await find_resource(session, resource)
-            logger.info(result)
-            data = json.loads(result.contents[0].text)
-            logger.info(json.dumps(data, indent=2))
+            data = _extract_json_from_resource(result)
+            try:
+                logger.info(json.dumps(data, indent=2) if data is not None else data)
+            except TypeError as e:
+                logger.error(f'Failed to serialize data to JSON: {e}')
+                logger.info(f'Raw data: {data}')
         if tool:
             if tool == 'search_flights':
                 results = await search_flights(session)
                 logger.info(results.model_dump())
             if tool == 'search_hotels':
                 result = await search_hotels(session)
-                data = json.loads(result.content[0].text)
-                logger.info(json.dumps(data, indent=2))
+                data = _extract_json_from_call(result)
+                try:
+                    logger.info(json.dumps(data, indent=2) if data is not None else data)
+                except TypeError as e:
+                    logger.error(f'Failed to serialize data to JSON: {e}')
+                    logger.info(f'Raw data: {data}')
             if tool == 'query_db':
                 result = await query_db(session)
-                logger.info(result)
-                data = json.loads(result.content[0].text)
-                logger.info(json.dumps(data, indent=2))
+                data = _extract_json_from_call(result)
+                try:
+                    logger.info(json.dumps(data, indent=2) if data is not None else data)
+                except TypeError as e:
+                    logger.error(f'Failed to serialize data to JSON: {e}')
+                    logger.info(f'Raw data: {data}')
 
 
 # Command line tester
 @click.command()
 @click.option('--host', default='localhost', help='SSE Host')
 @click.option('--port', default='10100', help='SSE Port')
-@click.option('--transport', default='stdio', help='MCP Transport')
+@click.option('--transport', default='sse', help='MCP Transport')
 @click.option('--find_agent', help='Query to find an agent')
 @click.option('--resource', help='URI of the resource to locate')
 @click.option('--tool_name', type=click.Choice(['search_flights', 'search_hotels', 'query_db']),
