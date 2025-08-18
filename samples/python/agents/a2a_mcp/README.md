@@ -247,6 +247,28 @@ bash samples/python/agents/a2a_mcp/run.sh
    uv run --env-file .env src/a2a_mcp/mcp/client.py --resource "resource://agent_cards/list" --find_agent "I would like to plan a trip to France."
    ```
 
+   ### Orchestrated End-to-End Demo (Experimental)
+
+   在已经启动 MCP Server + Orchestrator + Planner + 各 Task Agents 后，可以尝试脚本（会自动猜测执行/状态接口路径，若失败可手动指定）：
+
+   ```powershell
+   cd samples/python/agents/a2a_mcp
+   uv run --env-file .env examples/run_orchestrated_demo.py --query "Plan a 5 day trip to Paris on a 3000 USD budget"
+   ```
+
+   如果自动探测失败，可显式提供：
+
+   ```powershell
+   uv run --env-file .env examples/run_orchestrated_demo.py --query "Plan a 5 day trip" --execute-path /tasks --status-path-format /tasks/{task_id}
+   ```
+
+   脚本逻辑：
+   1. (可选) 访问 /openapi.json 猜测执行与轮询路径
+   2. 依次尝试候选 POST 路径发送用户请求
+   3. 轮询任务状态，打印状态变更、最终 artifacts / summary
+
+   根据你的 A2AStarletteApplication 实际路由可能需要调整 `CANDIDATE_EXECUTE_PATHS` 或 `CANDIDATE_STATUS_PATHS`。
+
 
 ### File/Directory Descriptions
 

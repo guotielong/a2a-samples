@@ -25,6 +25,7 @@ from langgraph_planner_agent import LangGraphPlannerAgent
 from orchestrator_agent import OrchestratorAgent
 
 
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -88,9 +89,21 @@ def main(host, port, agent_card):
             agent_card=agent_card, http_handler=request_handler
         )
 
+        app = server.build()
+        try:
+            # Log available routes to help clients discover correct endpoints (also print to stdout)
+            for r in getattr(app, 'routes', []):
+                path = getattr(r, 'path', repr(r))
+                methods = getattr(r, 'methods', [])
+                msg = f'Route available: {path} methods={methods}'
+                logger.info(msg)
+                print(msg)
+        except Exception as e:  # best-effort only
+            logger.debug(f'Could not enumerate routes: {e}')
+
         logger.info(f'Starting server on {host}:{port}')
 
-        uvicorn.run(server.build(), host=host, port=port)
+        uvicorn.run(app, host=host, port=port)
     except FileNotFoundError:
         logger.error(f"Error: File '{agent_card}' not found.")
         sys.exit(1)
