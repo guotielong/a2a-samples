@@ -3,24 +3,24 @@ import json
 import os
 import sqlite3
 import traceback
-
 from pathlib import Path
 
-import google.generativeai as genai
 import numpy as np
 import pandas as pd
 import requests
+from llama_index.embeddings.dashscope import DashScopeEmbedding
 
 from a2a_mcp.common.utils import init_api_key
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.logging import get_logger
 
-
 logger = get_logger(__name__)
 AGENT_CARDS_DIR = 'agent_cards'
-MODEL = 'models/embedding-001'
+MODEL = 'text-embedding-v2'  # DashScope embedding model per user sample
 SQLLITE_DB = 'travel_agency.db'
 PLACES_API_URL = 'https://places.googleapis.com/v1/places:searchText'
+
+_embedder: "DashScopeEmbedding | None" = None  # lazy init in generate_embedding
 
 
 def _mock_places_response(query: str, max_results: int = 5) -> dict:
@@ -49,38 +49,30 @@ def _mock_places_response(query: str, max_results: int = 5) -> dict:
         )
 
     return {"places": results}
+def generate_embedding(texts: str | list[str]) -> list[float] | list[list[float]]:
+    """Generate embedding(s) using DashScopeEmbedding with lazy initialization.
 
-
-def generate_embeddings(text):
-    """Generates embeddings for the given text using Google Generative AI.
-
-    Args:
-        text: The input string for which to generate embeddings.
-
-    Returns:
-        A list of embeddings representing the input text.
+    Usage:
+    - str -> list[float]
+    - list[str] -> list[list[float]] in same order
     """
-    # Allow a local mock for development/testing to avoid network/API failures.
-    if os.getenv('MOCK_EMBEDDINGS', '0') == '1':
-        logger.info('MOCK_EMBEDDINGS=1 detected, returning deterministic local embedding')
-        # deterministic pseudo-random vector based on text hash
-        seed = abs(hash(text)) % (2 ** 32)
-        rng = np.random.default_rng(seed)
-        return rng.random(768).astype(float).tolist()
-
+    global _embedder
+    if _embedder is None:
+        key = os.getenv('DASHSCOPE_API_KEY') or os.getenv('OPENAI_API_KEY')
+        if not key:
+            raise RuntimeError('DashScope API key not set (DASHSCOPE_API_KEY/OPENAI_API_KEY).')
+        try:
+            _embedder = DashScopeEmbedding(model_name=MODEL)
+        except Exception as e:  # pragma: no cover - network issues
+            logger.error(f'Failed to initialize DashScopeEmbedding: {e}', exc_info=True)
+            raise RuntimeError('Failed to initialize DashScopeEmbedding') from e
     try:
-        return genai.embed_content(
-            model=MODEL,
-            content=text,
-            task_type='retrieval_document',
-        )['embedding']
-    except Exception as e:
-        # Network, gRPC or API errors can happen; fall back to a deterministic
-        # local embedding so the server remains usable for testing.
-        logger.error(f'Failed to generate embeddings via genai: {e}. Falling back to local mock.', exc_info=True)
-        seed = abs(hash(text)) % (2 ** 32)
-        rng = np.random.default_rng(seed)
-        return rng.random(768).astype(float).tolist()
+        if isinstance(texts, str):
+            return _embedder.get_text_embedding_batch([texts])[0]  # type: ignore[arg-type]
+        return _embedder.get_text_embedding_batch(texts)  # type: ignore[arg-type]
+    except Exception as e:  # pragma: no cover
+        logger.error(f'Failed embedding generation: {e}', exc_info=True)
+        raise
 
 
 def load_agent_cards():
@@ -146,12 +138,13 @@ def build_agent_card_embeddings() -> pd.DataFrame:
             df = pd.DataFrame(
                 {'card_uri': card_uris, 'agent_card': agent_cards}
             )
-            df['card_embeddings'] = df.apply(
-                lambda row: generate_embeddings(json.dumps(row['agent_card'])),
-                axis=1,
-            )
+            # Prepare JSON string versions for embedding
+            json_blobs = [json.dumps(card) for card in df['agent_card']]
+            embeddings = generate_embedding(json_blobs)  # returns list[list[float]]
+            df['card_embeddings'] = embeddings
+            logger.info('Done generating embeddings for agent cards')
             return df
-        logger.info('Done generating embeddings for agent cards')
+        logger.info('No agent cards loaded; skipping embedding generation')
     except Exception as e:
         logger.error(f'An unexpected error occurred : {e}.', exc_info=True)
         return None
@@ -201,22 +194,8 @@ def serve(host, port, transport):  # noqa: PLR0915
                 'No agent cards available. Ensure agent card JSON files exist in the agent_cards directory.'
             )
 
-        # Generate query embedding with network fallback to deterministic local embedding
-        try:
-            query_embedding_resp = genai.embed_content(
-                model=MODEL, content=query, task_type='retrieval_query'
-            )
-            query_embedding = query_embedding_resp['embedding']
-        except Exception as e:
-            logger.error(
-                f'Failed to generate query embedding via genai: {e}. Falling back to local mock.',
-                exc_info=True,
-            )
-            seed = abs(hash(query)) % (2 ** 32)
-            rng = np.random.default_rng(seed)
-            # Use same dimensionality as card embeddings (assume first vector defines dim)
-            embedding_dim = len(df.iloc[0]['card_embeddings'])
-            query_embedding = rng.random(embedding_dim).astype(float).tolist()
+        # Generate query embedding
+        query_embedding = generate_embedding(query)
 
         # Compute similarity (dot product) and select best match
         try:
