@@ -1,5 +1,6 @@
 # type: ignore
 
+import json
 import logging
 import os
 
@@ -106,21 +107,47 @@ class LangGraphPlannerAgent(BaseAgent):
                     'require_user_input': False,
                     'content': message.content,
                 }
-                # If the model already produced a JSON asking for input, stop streaming more duplicates
-                if isinstance(message.content, str) and '"status"' in message.content and 'input_required' in message.content:
-                    break
-        yield self.get_agent_response(config)
+        
+        # Always get the final agent response after streaming
+        final_response = self.get_agent_response(config)
+        logger.info(f'Final agent response: {final_response}')
+        yield final_response
 
     def get_agent_response(self, config):
         current_state = self.graph.get_state(config)
+        logger.info(f'Current state values: {current_state.values}')
+        
         structured_response = current_state.values.get('structured_response')
-        if structured_response and isinstance(
-            structured_response, ResponseFormat
-        ):
-            if (
-                structured_response.status == 'input_required'
-                # and structured_response.content.tasks
-            ):
+        logger.info(f'Structured response: {structured_response}')
+        
+        # Try to parse the last message if no structured response
+        if not structured_response:
+            messages = current_state.values.get('messages', [])
+            if messages:
+                last_message = messages[-1]
+                logger.info(f'Last message: {last_message}')
+                
+                if isinstance(last_message, AIMessage) and last_message.content:
+                    try:
+                        import json
+                        # Try to parse JSON from the message content
+                        if isinstance(last_message.content, str):
+                            content = last_message.content.strip()
+                            if content.startswith('{') and content.endswith('}'):
+                                parsed_json = json.loads(content)
+                                logger.info(f'Parsed JSON from message: {parsed_json}')
+                                
+                                # Convert to ResponseFormat
+                                if 'status' in parsed_json:
+                                    structured_response = ResponseFormat(**parsed_json)
+                                    logger.info(f'Created structured response from message: {structured_response}')
+                    except Exception as e:
+                        logger.warning(f'Failed to parse JSON from message: {e}')
+        
+        if structured_response and isinstance(structured_response, ResponseFormat):
+            logger.info(f'Processing structured response with status: {structured_response.status}')
+            
+            if structured_response.status == 'input_required':
                 return {
                     'response_type': 'text',
                     'is_task_complete': False,
@@ -135,13 +162,20 @@ class LangGraphPlannerAgent(BaseAgent):
                     'content': structured_response.question,
                 }
             if structured_response.status == 'completed':
-                return {
-                    'response_type': 'data',
-                    'is_task_complete': True,
-                    'require_user_input': False,
-                    'content': structured_response.content.model_dump(),
-                }
+                logger.info(f'Task completed with content: {structured_response.content}')
+                if structured_response.content:
+                    return {
+                        'response_type': 'data',
+                        'is_task_complete': True,
+                        'require_user_input': False,
+                        'content': structured_response.content.model_dump(),
+                    }
+                else:
+                    logger.warning('Completed status but no content provided')
+        
+        logger.warning('No valid structured response found, returning default error response')
         return {
+            'response_type': 'text',
             'is_task_complete': False,
             'require_user_input': True,
             'content': 'We are unable to process your request at the moment. Please try again.',

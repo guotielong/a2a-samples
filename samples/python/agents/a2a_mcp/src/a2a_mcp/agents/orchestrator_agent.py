@@ -129,6 +129,7 @@ class OrchestratorAgent(BaseAgent):
     def set_node_attributes(
         self, node_id, task_id=None, context_id=None, query=None
     ):
+        """Set attributes for a node in the workflow graph."""
         attr_val = {}
         if task_id:
             attr_val['task_id'] = task_id
