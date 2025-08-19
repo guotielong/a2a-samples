@@ -9,15 +9,15 @@ from uuid import uuid4
 import httpx
 import networkx as nx
 
-from a2a.client import A2AClient
+from a2a.client.client import ClientConfig
+from a2a.client.client_factory import ClientFactory
 from a2a.client.errors import A2AClientHTTPError
 from a2a.types import (
     AgentCard,
-    MessageSendParams,
-    SendMessageRequest,
-    SendMessageSuccessResponse,
-    SendStreamingMessageRequest,
-    SendStreamingMessageSuccessResponse,
+    Message,
+    Part,
+    TextPart,
+    Role,
     TaskArtifactUpdateEvent,
     TaskState,
     TaskStatusUpdateEvent,
@@ -110,55 +110,103 @@ class WorkflowNode:
         # corporate/system HTTP proxies (e.g., Privoxy) which were injecting HTML error pages
         # and breaking SSE (Content-Type became text/html).
         async with httpx.AsyncClient(trust_env=False) as httpx_client:
-            a2a_client = A2AClient(httpx_client, agent_card)
+            # Use new A2A client API
+            config = ClientConfig(streaming=True, httpx_client=httpx_client)
+            factory = ClientFactory(config)
+            a2a_client = factory.create(agent_card)
 
-            payload: dict[str, any] = {
-                'message': {
-                    'role': 'user',
-                    'parts': [{'kind': 'text', 'text': query}],
-                    'messageId': uuid4().hex,
-                },
-            }
-            stream_req = SendStreamingMessageRequest(
-                id=str(uuid4()), params=MessageSendParams(**payload)
+            # Build message using new API
+            message = Message(
+                messageId=str(uuid4()),
+                role=Role.user,
+                parts=[Part(root=TextPart(text=query))],
             )
+
             try:
-                response_stream = a2a_client.send_message_streaming(stream_req)
-                async for chunk in response_stream:
-                    # Save the artifact as a result of the node
-                    if isinstance(
-                        chunk.root, SendStreamingMessageSuccessResponse
-                    ) and isinstance(
-                        chunk.root.result, TaskArtifactUpdateEvent
-                    ):
-                        artifact = chunk.root.result.artifact
-                        self.results = artifact
-                    yield chunk
+                async for event in a2a_client.send_message(message):
+                    # event is either (Task, UpdateEvent) | Message
+                    if isinstance(event, tuple):
+                        task, update = event
+                        if update is None:
+                            # Initial Task object - don't yield, just log
+                            logger.info(f'Task {task.id} status: {task.status.state}')
+                        else:
+                            if isinstance(update, TaskStatusUpdateEvent):
+                                # Check for input_required state
+                                if update.status.state == TaskState.input_required:
+                                    msg_txt = "Need more information"
+                                    if update.status.message and update.status.message.parts:
+                                        part0 = update.status.message.parts[0].root
+                                        msg_txt = getattr(part0, "text", None) or getattr(part0, "data", None) or msg_txt
+                                    
+                                    yield {
+                                        'response_type': 'text',
+                                        'is_task_complete': False,
+                                        'require_user_input': True,
+                                        'content': msg_txt,
+                                        'task_id': task.id,
+                                    }
+                                else:
+                                    # Working state or other status
+                                    msg_txt = "Processing..."
+                                    if update.status.message and update.status.message.parts:
+                                        part0 = update.status.message.parts[0].root
+                                        msg_txt = getattr(part0, "text", None) or getattr(part0, "data", None) or msg_txt
+                                    
+                                    yield {
+                                        'response_type': 'text',
+                                        'is_task_complete': False,
+                                        'require_user_input': False,
+                                        'content': msg_txt,
+                                        'task_id': task.id,
+                                    }
+                            elif isinstance(update, TaskArtifactUpdateEvent):
+                                # Save artifact and yield completion
+                                artifact = update.artifact
+                                self.results = artifact
+                                
+                                # Extract content from artifact
+                                content = "Task completed"
+                                if artifact.parts:
+                                    part0 = artifact.parts[0].root
+                                    if hasattr(part0, 'data'):
+                                        content = part0.data
+                                    elif hasattr(part0, 'text'):
+                                        content = part0.text
+                                
+                                yield {
+                                    'response_type': 'data' if hasattr(artifact.parts[0].root, 'data') else 'text',
+                                    'is_task_complete': True,
+                                    'require_user_input': False,
+                                    'content': content,
+                                    'task_id': task.id,
+                                    'artifact': artifact,  # Keep artifact for orchestrator
+                                }
+                            else:
+                                # Other update types - yield as working
+                                yield {
+                                    'response_type': 'text',
+                                    'is_task_complete': False,
+                                    'require_user_input': False,
+                                    'content': f"Update: {update}",
+                                    'task_id': task.id,
+                                }
+                    else:
+                        # Final Message response - treat as completion
+                        content = "Task completed"
+                        if hasattr(event, 'parts') and event.parts:
+                            part0 = event.parts[0].root
+                            content = getattr(part0, "text", None) or getattr(part0, "data", None) or content
+                        
+                        yield {
+                            'response_type': 'text',
+                            'is_task_complete': True,
+                            'require_user_input': False,
+                            'content': content,
+                        }
             except A2AClientHTTPError as e:
-                if 'Invalid SSE response or protocol error' in str(e):
-                    logger.error(
-                        'Streaming request failed (likely no SSE support or wrong endpoint). ' \
-                        'Agent url=%s error=%s. Attempting non-streaming fallback.',
-                        getattr(agent_card, 'url', 'UNKNOWN'),
-                        e,
-                    )
-                    # Fallback to non-streaming single request
-                    non_stream_req = SendMessageRequest(
-                        id=str(uuid4()), params=MessageSendParams(**payload)
-                    )
-                    try:
-                        response = await a2a_client.send_message(
-                            non_stream_req
-                        )
-                        yield response  # Orchestrator updated to handle SendMessageSuccessResponse
-                    except Exception as inner:
-                        logger.error(
-                            'Non-streaming fallback also failed: %s', inner
-                        )
-                        raise
-                else:
-                    logger.error('Downstream agent HTTP error: %s', e)
-                    raise
+                logger.error('A2A client error: %s', e)
+                raise
 
 
 class WorkflowGraph:
@@ -214,21 +262,18 @@ class WorkflowGraph:
                 # When the workflow node is paused, do not yield any chunks
                 # but, let the loop complete.
                 if node.state != Status.PAUSED:
-                    if isinstance(
-                        chunk.root, SendStreamingMessageSuccessResponse
-                    ) and (
-                        isinstance(chunk.root.result, TaskStatusUpdateEvent)
-                    ):
-                        task_status_event = chunk.root.result
-                        context_id = task_status_event.context_id
-                        if (
-                            task_status_event.status.state
-                            == TaskState.input_required
-                            and context_id
-                        ):
+                    # Handle the response format
+                    if isinstance(chunk, dict):
+                        # Check for input required state
+                        if chunk.get('require_user_input', False):
                             node.state = Status.PAUSED
                             self.state = Status.PAUSED
                             self.paused_node_id = node.id
+                        # Check for task completion
+                        elif chunk.get('is_task_complete', False):
+                            # Store any artifact if present
+                            if 'artifact' in chunk:
+                                node.results = chunk['artifact']
                     yield chunk
             if self.state == Status.PAUSED:
                 break

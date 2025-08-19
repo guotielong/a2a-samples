@@ -5,8 +5,6 @@ import os
 from collections.abc import AsyncIterable
 
 from a2a.types import (
-    SendMessageSuccessResponse,
-    SendStreamingMessageSuccessResponse,
     TaskArtifactUpdateEvent,
     TaskState,
     TaskStatusUpdateEvent,
@@ -71,29 +69,62 @@ class OrchestratorAgent(BaseAgent):
                 .replace('{CONVERSATION_HISTORY}', str(self.query_history))
                 .replace('{TRIP_QUESTION}', question)
             )
+            
+            logger.info(f'QA Request - Question: {question}')
+            logger.info(f'QA Request - Travel Context: {self.travel_context}')
+            logger.info(f'QA Request - Query History: {self.query_history}')
+            logger.info(f'QA Request - Full Prompt: {prompt[:500]}...')  # Log first 500 chars
+            
+            # Use text format directly since JSON schema has issues with DashScope
+            text_prompt = prompt + "\n\nPlease respond in JSON format with 'can_answer' (yes/no) and 'answer' fields."
+            logger.info(f'Attempting QA request with text format, prompt length: {len(text_prompt)}')
             completion = client.chat.completions.create(
                 model=os.getenv('DASHSCOPE_MODEL', 'qwen-long'),
-                messages=[{'role': 'user', 'content': prompt}],
+                messages=[{'role': 'user', 'content': text_prompt}],
                 temperature=0.0,
-                response_format={
-                    'type': 'json_schema',
-                    'json_schema': {
-                        'name': 'qa_answer',
-                        'schema': {
-                            'type': 'object',
-                            'properties': {
-                                'can_answer': {'type': 'string'},
-                                'answer': {'type': 'string'},
-                            },
-                            'required': ['can_answer', 'answer'],
-                        },
-                    },
-                },
             )
-            return completion.choices[0].message.content
+            response_text = completion.choices[0].message.content
+            logger.info(f'QA Response (text format): {response_text}')
+            
+            # Try to extract JSON from response
+            import re
+            # Look for JSON blocks in code fences or direct JSON
+            json_patterns = [
+                r'```json\s*(\{[^}]*"can_answer"[^}]*\})\s*```',  # JSON in code block
+                r'```\s*(\{[^}]*"can_answer"[^}]*\})\s*```',      # JSON in code block without language
+                r'(\{[^}]*"can_answer"[^}]*\})',                  # Direct JSON
+            ]
+            
+            for pattern in json_patterns:
+                json_match = re.search(pattern, response_text, re.DOTALL)
+                if json_match:
+                    extracted_json = json_match.group(1)
+                    logger.info(f'Extracted JSON: {extracted_json}')
+                    # Validate it's valid JSON
+                    try:
+                        import json as json_module
+                        parsed = json_module.loads(extracted_json)
+                        if 'can_answer' in parsed and 'answer' in parsed:
+                            return extracted_json
+                    except json_module.JSONDecodeError:
+                        logger.warning(f'Invalid JSON extracted: {extracted_json}')
+                        continue
+            
+            # If no valid JSON found, create a default response
+            # Clean the response text for inclusion
+            clean_text = response_text.replace('"', '\\"').replace('\n', ' ').strip()
+            default_response = '{"can_answer": "yes", "answer": "' + clean_text[:500] + '"}'
+            logger.info(f'No valid JSON found, created default: {default_response}')
+            return default_response
+                    
         except Exception as e:
-            logger.info(f'Error answering user question: {e}')
-        return '{"can_answer": "no", "answer": "Cannot answer based on provided context"}'
+            logger.error(f'Error answering user question: {e}')
+            import traceback
+            logger.error(f'Full traceback: {traceback.format_exc()}')
+        
+        default_fallback = '{"can_answer": "no", "answer": "Cannot answer based on provided context"}'
+        logger.info(f'Returning fallback response: {default_fallback}')
+        return default_fallback
 
     def set_node_attributes(
         self, node_id, task_id=None, context_id=None, query=None
@@ -140,10 +171,16 @@ class OrchestratorAgent(BaseAgent):
         logger.info(
             f'Running {self.agent_name} stream for session {context_id}, task {task_id} - {query}'
         )
+        logger.info(f'Current state - Graph exists: {self.graph is not None}')
+        logger.info(f'Current state - Graph state: {self.graph.state if self.graph else "N/A"}')
+        logger.info(f'Current state - Results count: {len(self.results)}')
+        logger.info(f'Current state - Travel context: {self.travel_context}')
+        
         if not query:
             raise ValueError('Query cannot be empty')
         if self.context_id != context_id:
             # Clear state when the context changes
+            logger.info(f'Context changed from {self.context_id} to {context_id}, clearing state')
             self.clear_state()
             self.context_id = context_id
 
@@ -151,6 +188,7 @@ class OrchestratorAgent(BaseAgent):
         start_node_id = None
         # Graph does not exist, start a new graph with planner node.
         if not self.graph:
+            logger.info('Creating new workflow graph with planner node')
             self.graph = WorkflowGraph()
             planner_node = self.add_graph_node(
                 task_id=task_id,
@@ -160,8 +198,10 @@ class OrchestratorAgent(BaseAgent):
                 node_label='Planner',
             )
             start_node_id = planner_node.id
+            logger.info(f'Created planner node with ID: {start_node_id}')
         # Paused state is when the agent might need more information.
         elif self.graph.state == Status.PAUSED:
+            logger.info(f'Graph is paused, resuming from node: {self.graph.paused_node_id}')
             start_node_id = self.graph.paused_node_id
             self.set_node_attributes(node_id=start_node_id, query=query)
 
@@ -170,6 +210,7 @@ class OrchestratorAgent(BaseAgent):
         # iself is not a part of the graph.
         # TODO: Make the graph dynamically iterable over edges
         while True:
+            logger.info(f'Starting workflow loop iteration with start_node_id: {start_node_id}')
             # Set attributes on the node so we propagate task and context
             self.set_node_attributes(
                 node_id=start_node_id,
@@ -178,60 +219,55 @@ class OrchestratorAgent(BaseAgent):
             )
             # Resume workflow, used when the workflow nodes are updated.
             should_resume_workflow = False
+            chunk_count = 0
             async for chunk in self.graph.run_workflow(
                 start_node_id=start_node_id
             ):
-                if isinstance(
-                    chunk.root,
-                    (SendStreamingMessageSuccessResponse, SendMessageSuccessResponse),
-                ):
-                    # The graph node retured TaskStatusUpdateEvent
-                    # Check if the node is complete and continue to the next node
-                    if isinstance(chunk.root.result, TaskStatusUpdateEvent):
-                        task_status_event = chunk.root.result
-                        context_id = task_status_event.context_id
-                        if (
-                            task_status_event.status.state
-                            == TaskState.completed
-                            and context_id
-                        ):
-                            ## yeild??
-                            continue
-                        if (
-                            task_status_event.status.state
-                            == TaskState.input_required
-                        ):
-                            question = task_status_event.status.message.parts[
-                                0
-                            ].root.text
+                chunk_count += 1
+                logger.info(f'Received chunk #{chunk_count}: {type(chunk)} - {str(chunk)[:200]}...')
+                
+                # Handle the response format expected by agent executor
+                if isinstance(chunk, dict):
+                    # Check if the task needs input
+                    if chunk.get('require_user_input', False):
+                        question = chunk.get('content', 'Need more information')
+                        logger.info(f'Task requires user input: {question}')
 
-                            try:
-                                answer = json.loads(
-                                    self.answer_user_question(question)
+                        try:
+                            logger.info('Attempting to answer user question with orchestrator')
+                            answer = json.loads(
+                                self.answer_user_question(question)
+                            )
+                            logger.info(f'Agent Answer: {answer}')
+                            if answer['can_answer'] == 'yes':
+                                # Orchestrator can answer on behalf of the user set the query
+                                # Resume workflow from paused state.
+                                query = answer['answer']
+                                start_node_id = self.graph.paused_node_id
+                                logger.info(f'Resuming workflow with answer: {query} from node: {start_node_id}')
+                                self.set_node_attributes(
+                                    node_id=start_node_id, query=query
                                 )
-                                logger.info(f'Agent Answer {answer}')
-                                if answer['can_answer'] == 'yes':
-                                    # Orchestrator can answer on behalf of the user set the query
-                                    # Resume workflow from paused state.
-                                    query = answer['answer']
-                                    start_node_id = self.graph.paused_node_id
-                                    self.set_node_attributes(
-                                        node_id=start_node_id, query=query
-                                    )
-                                    should_resume_workflow = True
-                            except Exception:
-                                logger.info('Cannot convert answer data')
-
-                    # The graph node retured TaskArtifactUpdateEvent
-                    # Store the node and continue.
-                    if isinstance(chunk.root.result, TaskArtifactUpdateEvent):
-                        artifact = chunk.root.result.artifact
+                                should_resume_workflow = True
+                            else:
+                                logger.info('Orchestrator cannot answer the question')
+                        except Exception as e:
+                            logger.error(f'Cannot convert answer data: {e}')
+                            import traceback
+                            logger.error(f'Traceback: {traceback.format_exc()}')
+                    
+                    # Check for task completion with artifact
+                    elif chunk.get('is_task_complete', False) and 'artifact' in chunk:
+                        artifact = chunk['artifact']
+                        logger.info(f'Task completed with artifact: {artifact.name}')
                         self.results.append(artifact)
                         if artifact.name == 'PlannerAgent-result':
                             # Planning agent returned data, update graph.
                             artifact_data = artifact.parts[0].root.data
+                            logger.info(f'Planner artifact data: {artifact_data}')
                             if 'trip_info' in artifact_data:
                                 self.travel_context = artifact_data['trip_info']
+                                logger.info(f'Updated travel context: {self.travel_context}')
                             logger.info(
                                 f'Updating workflow with {len(artifact_data["tasks"])} task nodes'
                             )
@@ -240,6 +276,7 @@ class OrchestratorAgent(BaseAgent):
                             for idx, task_data in enumerate(
                                 artifact_data['tasks']
                             ):
+                                logger.info(f'Adding task node {idx}: {task_data["description"]}')
                                 node = self.add_graph_node(
                                     task_id=task_id,
                                     context_id=context_id,
@@ -252,32 +289,42 @@ class OrchestratorAgent(BaseAgent):
                                 if idx == 0:
                                     should_resume_workflow = True
                                     start_node_id = node.id
+                                    logger.info(f'Will resume workflow from new node: {start_node_id}')
                         else:
                             # Not planner but artifacts from other tasks,
                             # continue to the next node in the workflow.
                             # client does not get the artifact,
                             # a summary is shown at the end of the workflow.
+                            logger.info(f'Non-planner artifact completed: {artifact.name}')
                             continue
+                
                 # When the workflow needs to be resumed, do not yield partial.
                 if not should_resume_workflow:
                     logger.info('No workflow resume detected, yielding chunk')
                     # Yield partial execution
                     yield chunk
+                else:
+                    logger.info('Workflow resume detected, breaking from chunk loop')
+                    break
             # The graph is complete and no updates, so okay to break from the loop.
             if not should_resume_workflow:
                 logger.info(
-                    'Workflow iteration complete and no restart requested. Exiting main loop.'
+                    f'Workflow iteration complete and no restart requested. Graph state: {self.graph.state}. Exiting main loop.'
                 )
                 break
             else:
                 # Readable logs
-                logger.info('Restarting workflow loop.')
+                logger.info('Restarting workflow loop with should_resume_workflow=True')
+        
+        logger.info(f'Main workflow loop ended. Graph state: {self.graph.state}')
         if self.graph.state == Status.COMPLETED:
             # All individual actions complete, now generate the summary
             logger.info(f'Generating summary for {len(self.results)} results')
+            logger.info(f'Results: {[r.name for r in self.results]}')
             summary = await self.generate_summary()
+            logger.info(f'Generated summary: {summary}')
             self.clear_state()
-            logger.info(f'Summary: {summary}')
+            logger.info('State cleared after completion')
             yield {
                 'response_type': 'text',
                 'is_task_complete': True,
