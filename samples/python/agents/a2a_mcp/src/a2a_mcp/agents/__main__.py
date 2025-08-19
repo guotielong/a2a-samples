@@ -3,12 +3,19 @@
 import json
 import logging
 import sys
-
 from pathlib import Path
 
 import click
 import httpx
 import uvicorn
+
+# Ensure package root on path if executed as a script via a path (fallback scenario)
+if __package__ is None or __package__ == "":  # pragma: no cover
+    # Running as "python src/a2a_mcp/agents" or similar.
+    from pathlib import Path as _Path
+    _root = _Path(__file__).resolve().parents[2]  # points to src directory
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -20,9 +27,9 @@ from a2a.server.tasks import (
 from a2a.types import AgentCard
 from a2a_mcp.common import prompts
 from a2a_mcp.common.agent_executor import GenericAgentExecutor
-from adk_travel_agent import TravelAgent
-from langgraph_planner_agent import LangGraphPlannerAgent
-from orchestrator_agent import OrchestratorAgent
+from a2a_mcp.agents.adk_travel_agent import TravelAgent
+from a2a_mcp.agents.langgraph_planner_agent import LangGraphPlannerAgent
+from a2a_mcp.agents.orchestrator_agent import OrchestratorAgent
 
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
@@ -101,8 +108,7 @@ def main(host, port, agent_card):
         except Exception as e:  # best-effort only
             logger.debug(f'Could not enumerate routes: {e}')
 
-        logger.info(f'Starting server on {host}:{port}')
-
+        logger.info(f'Starting agent server {agent_card.name} on {host}:{port}')
         uvicorn.run(app, host=host, port=port)
     except FileNotFoundError:
         logger.error(f"Error: File '{agent_card}' not found.")

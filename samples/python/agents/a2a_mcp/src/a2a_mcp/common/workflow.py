@@ -10,9 +10,12 @@ import httpx
 import networkx as nx
 
 from a2a.client import A2AClient
+from a2a.client.errors import A2AClientHTTPError
 from a2a.types import (
     AgentCard,
     MessageSendParams,
+    SendMessageRequest,
+    SendMessageSuccessResponse,
     SendStreamingMessageRequest,
     SendStreamingMessageSuccessResponse,
     TaskArtifactUpdateEvent,
@@ -93,30 +96,69 @@ class WorkflowNode:
             agent_card = await self.get_planner_resource()
         else:
             agent_card = await self.find_agent_for_task()
-        async with httpx.AsyncClient() as httpx_client:
-            client = A2AClient(httpx_client, agent_card)
+        if not agent_card:
+            logger.error('No agent card resolved for node; aborting execution')
+            return
+        logger.info(
+            'Invoking downstream agent name=%s url=%s node_key=%s task_snippet=%s',
+            getattr(agent_card, 'name', 'UNKNOWN'),
+            getattr(agent_card, 'url', 'UNKNOWN'),
+            self.node_key,
+            (query[:80] + '…') if query and len(query) > 80 else query,
+        )
+        # Use trust_env=False so local intra-process calls (localhost) are NOT routed via any
+        # corporate/system HTTP proxies (e.g., Privoxy) which were injecting HTML error pages
+        # and breaking SSE (Content-Type became text/html).
+        async with httpx.AsyncClient(trust_env=False) as httpx_client:
+            a2a_client = A2AClient(httpx_client, agent_card)
 
             payload: dict[str, any] = {
                 'message': {
                     'role': 'user',
                     'parts': [{'kind': 'text', 'text': query}],
                     'messageId': uuid4().hex,
-                    'taskId': task_id,
-                    'contextId': context_id,
                 },
             }
-            request = SendStreamingMessageRequest(
+            stream_req = SendStreamingMessageRequest(
                 id=str(uuid4()), params=MessageSendParams(**payload)
             )
-            response_stream = client.send_message_streaming(request)
-            async for chunk in response_stream:
-                # Save the artifact as a result of the node
-                if isinstance(
-                    chunk.root, SendStreamingMessageSuccessResponse
-                ) and (isinstance(chunk.root.result, TaskArtifactUpdateEvent)):
-                    artifact = chunk.root.result.artifact
-                    self.results = artifact
-                yield chunk
+            try:
+                response_stream = a2a_client.send_message_streaming(stream_req)
+                async for chunk in response_stream:
+                    # Save the artifact as a result of the node
+                    if isinstance(
+                        chunk.root, SendStreamingMessageSuccessResponse
+                    ) and isinstance(
+                        chunk.root.result, TaskArtifactUpdateEvent
+                    ):
+                        artifact = chunk.root.result.artifact
+                        self.results = artifact
+                    yield chunk
+            except A2AClientHTTPError as e:
+                if 'Invalid SSE response or protocol error' in str(e):
+                    logger.error(
+                        'Streaming request failed (likely no SSE support or wrong endpoint). ' \
+                        'Agent url=%s error=%s. Attempting non-streaming fallback.',
+                        getattr(agent_card, 'url', 'UNKNOWN'),
+                        e,
+                    )
+                    # Fallback to non-streaming single request
+                    non_stream_req = SendMessageRequest(
+                        id=str(uuid4()), params=MessageSendParams(**payload)
+                    )
+                    try:
+                        response = await a2a_client.send_message(
+                            non_stream_req
+                        )
+                        yield response  # Orchestrator updated to handle SendMessageSuccessResponse
+                    except Exception as inner:
+                        logger.error(
+                            'Non-streaming fallback also failed: %s', inner
+                        )
+                        raise
+                else:
+                    logger.error('Downstream agent HTTP error: %s', e)
+                    raise
 
 
 class WorkflowGraph:

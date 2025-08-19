@@ -1,115 +1,128 @@
-"""Minimal caller for the Orchestrator Agent root POST endpoint (/).
+"""Example: invoke Orchestrator Agent using the A2A Python SDK (no manual JSON-RPC).
 
-We discovered only these routes are exposed:
-  POST /
-  GET /.well-known/agent-card.json
-  GET /.well-known/agent.json
-
-So orchestration must be triggered by POST /. This script sends a user query
-as an A2A-style message and prints incremental bytes (supports streaming / chunked).
+This replaces the previous low-level httpx streaming script with the high-level
+`A2AClient` used elsewhere in the sample (see `workflow.py`). It will:
+  * Load an Agent Card (default: `agent_cards/orchestrator_agent.json`).
+  * Attempt a streaming `send_message`; if server lacks streaming support, fall back.
+  * Print incremental TaskStatus updates and artifacts.
+  * Finally print any completion / summary payload.
 
 Usage (PowerShell):
-  uv run --env-file .env examples/run_orchestrator_call.py --query "Plan a 5 day trip to Paris on a 3000 USD budget" --url http://localhost:10101/
+  uv run --env-file .env examples/run_orchestrator_call.py \
+    --query "Plan a 5 day trip to Paris on a 3000 USD budget"
 
-If you want a simpler payload try --mode simple which sends {"input": "..."}.
-Default mode builds a full message envelope similar to what downstream A2A nodes expect.
+Optional:
+  --agent-card path/to/card.json  (override default)
+  --raw (print each raw JSON envelope line)
+
+Run:
+uv run --env-file .env examples/run_orchestrator_call.py --query "Plan a 5 day trip to Paris on a 3000 USD budget"
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import uuid
-from typing import Optional, List
+from pathlib import Path
+from uuid import uuid4
 
 import click
 import httpx
 
-
-def build_message_envelope(query: str):
-    return {
-        "role": "user",
-        "parts": [
-            {"kind": "text", "text": query}
-        ],
-        "messageId": uuid.uuid4().hex,
-    }
-
-
-def build_jsonrpc(method: str, message_env: dict):
-    return {
-        "jsonrpc": "2.0",
-        "id": uuid.uuid4().hex,
-        "method": method,
-        "params": {"message": message_env},
-    }
+from a2a.client import A2AClient
+from a2a.client.errors import A2AClientHTTPError
+from a2a.types import (
+    AgentCard,
+    MessageSendParams,
+    SendMessageRequest,
+    SendMessageSuccessResponse,
+    SendStreamingMessageRequest,
+    SendStreamingMessageSuccessResponse,
+    TaskArtifactUpdateEvent,
+    TaskStatusUpdateEvent,
+    TaskState,
+)
 
 
-async def post_and_stream(url: str, payload: dict, timeout: int, show_raw: bool):
-    """POST payload and attempt to consume a (possibly) streaming response.
+def load_agent_card(path: Path) -> AgentCard:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return AgentCard(**data)
 
-    More defensive than previous version:
-      * Prints chunks as they arrive.
-      * Captures partial output if the server closes early (RemoteProtocolError).
-      * Falls back to printing whatever JSON could be decoded.
-    """
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        collected: list[bytes] = []
+
+async def run(query: str, card_path: Path, raw: bool, timeout: int):  # noqa: C901 (clarity)
+    if not card_path.exists():
+        raise FileNotFoundError(f"Agent card not found: {card_path}")
+    agent_card = load_agent_card(card_path)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as httpx_client:
+        client = A2AClient(httpx_client, agent_card)
+        payload = {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": query}],
+                "messageId": uuid4().hex,
+            }
+        }
+        stream_req = SendStreamingMessageRequest(
+            id=str(uuid4()), params=MessageSendParams(**payload)
+        )
+        print(f"Connecting to {agent_card.url} (streaming attempt)...")
         try:
-            async with client.stream("POST", url, json=payload) as resp:
-                print(f"Status: {resp.status_code}")
-                try:
-                    async for chunk in resp.aiter_bytes():
-                        if not chunk:
-                            continue
-                        collected.append(chunk)
-                        if show_raw:
-                            # Show raw bytes progressively
-                            print(chunk.decode(errors="ignore"), end="", flush=True)
-                except httpx.RemoteProtocolError as e:  # incomplete chunked read
-                    print(f"\n[warn] RemoteProtocolError while streaming: {e}. Attempting to parse partial body...")
-                # After stream ends (cleanly or with error), attempt JSON parse on collected bytes
-                body_bytes = b"".join(collected)
-                if not show_raw:
-                    # Only pretty print JSON if not already dumping raw
-                    try:
-                        parsed = json.loads(body_bytes.decode(errors="ignore")) if body_bytes else {}
-                        print(json.dumps(parsed, indent=2))
-                    except Exception:
-                        print(body_bytes.decode(errors="ignore"))
-        except httpx.ReadTimeout:
-            print("Timed out while reading response.")
-        except Exception as e:
-            print(f"Unexpected error performing request: {e}")
+            async for envelope in client.send_message_streaming(stream_req):
+                # envelope.root.* is the success / event container
+                if raw:
+                    if hasattr(envelope, "model_dump_json"):
+                        print(envelope.model_dump_json())
+                    else:
+                        print(envelope)
+                    continue
+                root = envelope.root
+                if isinstance(root, SendStreamingMessageSuccessResponse):
+                    result = root.result
+                    if isinstance(result, TaskStatusUpdateEvent):
+                        status = result.status
+                        msg_txt = None
+                        if status.message and status.message.parts:
+                            part0 = status.message.parts[0].root
+                            msg_txt = getattr(part0, "text", None) or getattr(part0, "data", None)
+                        print(f"[status] state={status.state} msg={msg_txt}")
+                        if status.state == TaskState.completed:
+                            # final completed chunk for this internal task
+                            pass
+                    elif isinstance(result, TaskArtifactUpdateEvent):
+                        art = result.artifact
+                        print(f"[artifact] name={art.name} type={art.parts[0].root.__class__.__name__}")
+                    else:
+                        # Could be final summary dict emitted by orchestrator (non-typed)
+                        print("[event]", root)
+                else:
+                    print("[unhandled]", root)
+        except A2AClientHTTPError as e:
+            print(f"Streaming attempt failed ({e}); falling back to non-streaming send_message")
+            non_stream_req = SendMessageRequest(
+                id=str(uuid4()), params=MessageSendParams(**payload)
+            )
+            resp = await client.send_message(non_stream_req)
+            if raw:
+                print(resp.model_dump_json())
+            elif isinstance(resp, SendMessageSuccessResponse):
+                print("[response]", resp.root)
+            else:
+                print(resp)
 
 
 @click.command()
-@click.option("--url", default="http://localhost:10101/", show_default=True, help="Orchestrator root POST endpoint")
 @click.option("--query", required=True, help="User query to orchestrate")
-@click.option("--method", default=None, help="Explicit JSON-RPC method name. If omitted, will try a list.")
-@click.option("--timeout", default=120, show_default=True, help="Total HTTP timeout seconds")
-@click.option("--show-raw", is_flag=True, help="Print raw response bytes (fallback if not JSON)")
-def cli(url: str, query: str, method: Optional[str], timeout: int, show_raw: bool):
-    message_env = build_message_envelope(query)
-    candidates: List[str] = [method] if method else [
-        # Try streaming first (may fail if server not implementing JSON-RPC streaming)
-        "message/stream",
-        # Fallback non-streaming variant
-        "message/send",
-    ]
-    for m in candidates:
-        if m is None:
-            continue
-        print(f"\n=== Trying method: {m} ===")
-        payload = build_jsonrpc(m, message_env)
-        print(json.dumps(payload, indent=2))
-        try:
-            asyncio.run(post_and_stream(url, payload, timeout, show_raw))
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:  # catch unexpected top-level errors so we can try next method
-            print(f"[warn] Exception invoking method '{m}': {e}")
-        print("(If error.code == -32601 (method not found), trying next candidate)")
+@click.option(
+    "--agent-card",
+    "agent_card_path",
+    default="agent_cards/orchestrator_agent.json",
+    show_default=True,
+    help="Path to orchestrator Agent Card JSON",
+)
+@click.option("--timeout", default=120, show_default=True, help="HTTP client timeout seconds")
+@click.option("--raw", is_flag=True, help="Print raw JSON envelopes")
+def cli(query: str, agent_card_path: str, timeout: int, raw: bool):
+    asyncio.run(run(query, Path(agent_card_path), raw, timeout))
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     cli()

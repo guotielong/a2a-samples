@@ -16,9 +16,7 @@ from mcp.types import CallToolResult, ReadResourceResult
 
 logger = get_logger(__name__)
 
-env = {
-    'GOOGLE_API_KEY': os.getenv('GOOGLE_API_KEY'),
-}
+env = {}
 
 
 @asynccontextmanager
@@ -56,9 +54,6 @@ async def init_session(host, port, transport):
                 logger.info('SSE ClientSession initialized successfully.')
                 yield session
     elif transport == 'stdio':
-        if not os.getenv('GOOGLE_API_KEY'):
-            logger.error('GOOGLE_API_KEY is not set')
-            raise ValueError('GOOGLE_API_KEY is not set')
         stdio_params = StdioServerParameters(
             command='uv',
             args=['run', 'a2a-mcp'],

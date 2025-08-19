@@ -1,8 +1,5 @@
-# type: ignore
 import logging
 import os
-
-import google.generativeai as genai
 
 from a2a_mcp.common.types import ServerConfig
 
@@ -11,12 +8,23 @@ logger = logging.getLogger(__name__)
 
 
 def init_api_key():
-    """Initialize the API key for Google Generative AI."""
-    if not os.getenv('GOOGLE_API_KEY'):
-        logger.error('GOOGLE_API_KEY is not set')
-        raise ValueError('GOOGLE_API_KEY is not set')
+    """Initialize API keys for providers (DashScope / OpenAI compatible).
 
-    genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
+    Priority:
+    1. If DASHSCOPE_API_KEY present, proceed.
+    2. Else if OPENAI_API_KEY present, proceed.
+    Raise if neither key is present.
+    """
+    dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+    openai_key = os.getenv('OPENAI_API_KEY')
+
+    if not dashscope_key and not openai_key:
+        logger.error('Neither DASHSCOPE_API_KEY nor OPENAI_API_KEY is set')
+        raise ValueError('Missing DASHSCOPE_API_KEY or OPENAI_API_KEY')
+    if dashscope_key:
+        logger.info('Using DashScope key')
+    elif openai_key:
+        logger.info('Using OpenAI key')
 
 
 def config_logging():

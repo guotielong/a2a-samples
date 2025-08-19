@@ -11,7 +11,7 @@ This will:
   * print the final structured tasks when completed
 
 Environment:
-  GOOGLE_API_KEY (or GEMINI related key expected by init_api_key()) must be set in .env
+  Requires DASHSCOPE_API_KEY or OPENAI_API_KEY in .env
 """
 from __future__ import annotations
 

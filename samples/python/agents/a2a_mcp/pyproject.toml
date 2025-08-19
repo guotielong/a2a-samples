@@ -9,10 +9,9 @@ dependencies = [
     "click>=8.1.8",
     "fastmcp>=1.0",
     "google-adk>=1.0.0",
-    "google-cloud-aiplatform>=1.91.0",
-    "google-generativeai>=0.8.5",
     "httpx>=0.28.1",
-    "langchain-google-genai>=2.0.10",
+    # Added for DashScope / OpenAI compatible integration
+    "langchain-openai>=0.2.5",
     "langchain-mcp-adapters>=0.0.9",
     "langgraph>=0.4.1",
     "mcp[cli]>=1.5.0",
@@ -27,6 +26,12 @@ dependencies = [
     "llama-index>=0.11.0",
     "llama-index-embeddings-dashscope>=0.2.0",
     "dashscope>=1.22.3",
+]
+
+# Optional dependency groups (uv will treat these as PEP 735 groups).
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.5",
 ]
 
 [project.scripts]

@@ -1,6 +1,7 @@
 # type: ignore
 
 import logging
+import os
 
 from collections.abc import AsyncIterable
 from typing import Any, Literal
@@ -10,7 +11,7 @@ from a2a_mcp.common.base_agent import BaseAgent
 from a2a_mcp.common.types import TaskList
 from a2a_mcp.common.utils import init_api_key
 from langchain_core.messages import AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
@@ -24,11 +25,15 @@ class ResponseFormat(BaseModel):
     """Respond to the user in this format."""
 
     status: Literal['input_required', 'completed', 'error'] = 'input_required'
+    # Clarifying question or error message. Required when status is input_required or error.
     question: str = Field(
-        description='Input needed from the user to generate the plan'
+        default="",
+        description='Input needed from the user (or brief error). Empty when status=="completed".'
     )
-    content: TaskList = Field(
-        description='List of tasks when the plan is generated'
+    # Optional until plan is completed.
+    content: TaskList | None = Field(
+        default=None,
+        description='List of tasks when the plan is generated (present when status=="completed")'
     )
 
 
@@ -46,8 +51,12 @@ class LangGraphPlannerAgent(BaseAgent):
             content_types=['text', 'text/plain'],
         )
 
-        self.model = ChatGoogleGenerativeAI(
-            model='gemini-2.0-flash', temperature=0.0
+        # Use DashScope OpenAI-compatible endpoint (fallback to base_url env if provided)
+        self.model = ChatOpenAI(
+            model=os.getenv('DASHSCOPE_MODEL', 'qwen-plus'),
+            temperature=0.0,
+            base_url='https://dashscope.aliyuncs.com/compatible-mode/v1',
+            api_key=os.getenv('DASHSCOPE_API_KEY'),
         )
 
         self.graph = create_react_agent(
@@ -61,13 +70,27 @@ class LangGraphPlannerAgent(BaseAgent):
 
     def invoke(self, query, sessionId) -> str:
         config = {'configurable': {'thread_id': sessionId}}
-        self.graph.invoke({'messages': [('user', query)]}, config)
+        # DashScope requires the literal word 'json' to appear in the messages
+        # when using a response_format of type json_object. Append a short hint
+        # if the user query itself lacks it so we don't force the user to know
+        # this provider-specific requirement.
+        user_query = (
+            query
+            if 'json' in query.lower()
+            else f"{query}\n\nPlease respond in valid JSON."
+        )
+        self.graph.invoke({'messages': [('user', user_query)]}, config)
         return self.get_agent_response(config)
 
     async def stream(
         self, query, sessionId, task_id
     ) -> AsyncIterable[dict[str, Any]]:
-        inputs = {'messages': [('user', query)]}
+        user_query = (
+            query
+            if 'json' in query.lower()
+            else f"{query}\n\nPlease respond in valid JSON."
+        )
+        inputs = {'messages': [('user', user_query)]}
         config = {'configurable': {'thread_id': sessionId}}
 
         logger.info(
@@ -83,6 +106,9 @@ class LangGraphPlannerAgent(BaseAgent):
                     'require_user_input': False,
                     'content': message.content,
                 }
+                # If the model already produced a JSON asking for input, stop streaming more duplicates
+                if isinstance(message.content, str) and '"status"' in message.content and 'input_required' in message.content:
+                    break
         yield self.get_agent_response(config)
 
     def get_agent_response(self, config):

@@ -159,7 +159,7 @@ def serve(host, port, transport):  # noqa: PLR0915
         transport: The transport mechanism for the MCP server (e.g., 'stdio', 'sse').
 
     Raises:
-        ValueError: If the 'GOOGLE_API_KEY' environment variable is not set.
+        ValueError: If required provider API keys are not set.
     """
     init_api_key()
     logger.info('Starting Agent Cards MCP Server')

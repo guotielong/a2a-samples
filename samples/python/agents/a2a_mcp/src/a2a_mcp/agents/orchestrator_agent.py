@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 
 from collections.abc import AsyncIterable
 
 from a2a.types import (
+    SendMessageSuccessResponse,
     SendStreamingMessageSuccessResponse,
     TaskArtifactUpdateEvent,
     TaskState,
@@ -13,7 +15,7 @@ from a2a_mcp.common import prompts
 from a2a_mcp.common.base_agent import BaseAgent
 from a2a_mcp.common.utils import init_api_key
 from a2a_mcp.common.workflow import Status, WorkflowGraph, WorkflowNode
-from google import genai
+from openai import OpenAI
 
 
 logger = logging.getLogger(__name__)
@@ -35,33 +37,60 @@ class OrchestratorAgent(BaseAgent):
         self.query_history = []
         self.context_id = None
 
-    async def generate_summary(self) -> str:
-        client = genai.Client()
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompts.SUMMARY_COT_INSTRUCTIONS.replace(
-                '{travel_data}', str(self.results)
-            ),
-            config={'temperature': 0.0},
+    def _get_client(self):
+        """Return an OpenAI-compatible client (DashScope or other)."""
+        api_key = os.getenv('DASHSCOPE_API_KEY') or os.getenv('OPENAI_API_KEY')
+        base_url = os.getenv(
+            'OPENAI_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'
         )
-        return response.text
+        return OpenAI(api_key=api_key, base_url=base_url)
+
+    async def generate_summary(self) -> str:
+        client = self._get_client()
+        prompt = prompts.SUMMARY_COT_INSTRUCTIONS.replace(
+            '{travel_data}', str(self.results)
+        )
+        try:
+            completion = client.chat.completions.create(
+                model=os.getenv('DASHSCOPE_MODEL', 'qwen-long') ,
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.0,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:  # pragma: no cover
+            logger.error(f'Failed to generate summary: {e}')
+            return 'Summary unavailable due to upstream error.'
 
     def answer_user_question(self, question) -> str:
         try:
-            client = genai.Client()
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompts.QA_COT_PROMPT.replace(
+            client = self._get_client()
+            prompt = (
+                prompts.QA_COT_PROMPT.replace(
                     '{TRIP_CONTEXT}', str(self.travel_context)
                 )
                 .replace('{CONVERSATION_HISTORY}', str(self.query_history))
-                .replace('{TRIP_QUESTION}', question),
-                config={
-                    'temperature': 0.0,
-                    'response_mime_type': 'application/json',
+                .replace('{TRIP_QUESTION}', question)
+            )
+            completion = client.chat.completions.create(
+                model=os.getenv('DASHSCOPE_MODEL', 'qwen-long'),
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.0,
+                response_format={
+                    'type': 'json_schema',
+                    'json_schema': {
+                        'name': 'qa_answer',
+                        'schema': {
+                            'type': 'object',
+                            'properties': {
+                                'can_answer': {'type': 'string'},
+                                'answer': {'type': 'string'},
+                            },
+                            'required': ['can_answer', 'answer'],
+                        },
+                    },
                 },
             )
-            return response.text
+            return completion.choices[0].message.content
         except Exception as e:
             logger.info(f'Error answering user question: {e}')
         return '{"can_answer": "no", "answer": "Cannot answer based on provided context"}'
@@ -152,7 +181,10 @@ class OrchestratorAgent(BaseAgent):
             async for chunk in self.graph.run_workflow(
                 start_node_id=start_node_id
             ):
-                if isinstance(chunk.root, SendStreamingMessageSuccessResponse):
+                if isinstance(
+                    chunk.root,
+                    (SendStreamingMessageSuccessResponse, SendMessageSuccessResponse),
+                ):
                     # The graph node retured TaskStatusUpdateEvent
                     # Check if the node is complete and continue to the next node
                     if isinstance(chunk.root.result, TaskStatusUpdateEvent):

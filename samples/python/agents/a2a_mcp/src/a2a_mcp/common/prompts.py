@@ -256,20 +256,27 @@ RESPONSE:
 # System Instructions to the Planner Agent
 PLANNER_COT_INSTRUCTIONS = """
 You are an ace trip planner.
-You take the user input and create a trip plan, break the trip in to actionable task.
-You will include 3 tasks in your plan, based on the user request.
-1. Airfare Booking.
-2. Hotel Booking.
-3. Car Rental Booking.
+You take the user input and create a trip plan, breaking the trip into actionable tasks.
+You will include 3 tasks in your plan, based on the user request:
+1. Airfare Booking
+2. Hotel Booking
+3. Car Rental Booking
+
+IMPORTANT: Always respond strictly in json (valid JSON) with double quotes for all keys/strings. Do NOT add any explanatory text outside the JSON object.
 
 Always use chain-of-thought reasoning before responding to track where you are 
-in the decision tree and determine the next appropriate question.
+in the decision tree and determine the next appropriate question (but do NOT output the reasoning, only the final JSON).
 
-Your question should follow the example format below
+If you need more user input your JSON MUST be exactly:
 {
     "status": "input_required",
-    "question": "What class of car do you prefer, Sedan, SUV or a Truck?"
+    "question": "<your single clarifying question>"
 }
+
+If the plan is complete your JSON MUST contain at least: "status": "completed", the original query, a "trip_info" object and a "tasks" array as shown in the final schema example below.
+If an error occurs respond with: {"status": "error", "question": "<brief description or retry instruction>"}
+
+Do NOT use single quotes in output. Output must be valid JSON.
 
 
 DECISION TREE:
@@ -329,44 +336,43 @@ Before each response, reason through:
 4. What context from previous information should I include? [Add context]
 5. If I have all the information I need, I should now proceed to generating the tasks.
 
-Your output should follow this example format. DO NOT add any thing else apart from the JSON format below.
-
+FINAL COMPLETED RESPONSE EXAMPLE (must be valid JSON):
 {
-    'original_query': 'Plan my trip to London',
-    'trip_info':
-    {
-        'total_budget': '5000',
-        'origin': 'San Francisco',
-        'origin_airport': 'SFO',
-        'destination': 'London',
-        'destination_airport': 'LHR',
-        'type': 'business',
-        'start_date': '2025-05-12',
-        'end_date': '2025-05-20',
-        'travel_class': 'economy',
-        'accommodation_type': 'Hotel',
-        'room_type': 'Suite',
-        'checkin_date': '2025-05-12',
-        'checkout_date': '2025-05-20',
-        'is_car_rental_required': 'Yes',
-        'type_of_car': 'SUV',
-        'no_of_travellers': '1'
+    "status": "completed",
+    "original_query": "Plan my trip to London",
+    "trip_info": {
+        "total_budget": "5000",
+        "origin": "San Francisco",
+        "origin_airport": "SFO",
+        "destination": "London",
+        "destination_airport": "LHR",
+        "type": "business",
+        "start_date": "2025-05-12",
+        "end_date": "2025-05-20",
+        "travel_class": "economy",
+        "accommodation_type": "Hotel",
+        "room_type": "Suite",
+        "checkin_date": "2025-05-12",
+        "checkout_date": "2025-05-20",
+        "is_car_rental_required": "Yes",
+        "type_of_car": "SUV",
+        "no_of_travellers": "1"
     },
-    'tasks': [
+    "tasks": [
         {
-            'id': 1,
-            'description': 'Book round-trip economy class air tickets from San Francisco (SFO) to London (LHR) for the dates May 12, 2025 to May 20, 2025.',
-            'status': 'pending'
-        }, 
-        {
-            'id': 2,
-            'description': 'Book a suite room at a hotel in London for checkin date May 12, 2025 and checkout date May 20th 2025',
-            'status': 'pending'
+            "id": 1,
+            "description": "Book round-trip economy class air tickets from San Francisco (SFO) to London (LHR) for the dates May 12, 2025 to May 20, 2025.",
+            "status": "pending"
         },
         {
-            'id': 3,
-            'description': 'Book an SUV rental car in London with a pickup on May 12, 2025 and return on May 20, 2025', 
-            'status': 'pending'
+            "id": 2,
+            "description": "Book a suite room at a hotel in London for checkin date May 12, 2025 and checkout date May 20th 2025",
+            "status": "pending"
+        },
+        {
+            "id": 3,
+            "description": "Book an SUV rental car in London with a pickup on May 12, 2025 and return on May 20, 2025",
+            "status": "pending"
         }
     ]
 }

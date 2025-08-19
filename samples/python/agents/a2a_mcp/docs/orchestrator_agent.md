@@ -14,7 +14,6 @@
 ## 关键导入与成员
 - 从 `a2a.types` 导入的一些事件/类型：`SendStreamingMessageSuccessResponse`, `TaskArtifactUpdateEvent`, `TaskState`, `TaskStatusUpdateEvent` —— 用于判断和解析工作流中节点返回的事件。
 - `prompts`：包含用于 LLM 的提示模板（如摘要、QA）。
-- `genai`（Google Gemini 客户端）：用于调用 LLM 生成 summary 与回答问题。
 - 成员变量：
   - `self.graph`：当前 `WorkflowGraph` 实例（或 None）。
   - `self.results`：收集来自任务的 artifact 列表。
@@ -29,10 +28,10 @@
 
 ## LLM 相关方法
 - `generate_summary(self) -> str`：
-  - 用 Gemini 模型（'gemini-2.0-flash'）基于 `prompts.SUMMARY_COT_INSTRUCTIONS` 和 `self.results` 生成最终 summary。
+  - 使用 OpenAI/DashScope 兼容接口基于 `prompts.SUMMARY_COT_INSTRUCTIONS` 和 `self.results` 生成最终 summary。
   - temperature=0.0（确定性）。
 - `answer_user_question(self, question) -> str`：
-  - 用 Gemini 结合 `prompts.QA_COT_PROMPT`（填充 `TRIP_CONTEXT`、`CONVERSATION_HISTORY`、问题），请求 `response_mime_type='application/json'`，返回 `response.text`（期望 JSON 字符串，包含 can_answer/answer 等字段）。
+  - 使用同一兼容接口结合 `prompts.QA_COT_PROMPT`（填充 `TRIP_CONTEXT`、`CONVERSATION_HISTORY`、问题），返回 JSON 字符串（包含 can_answer/answer 等字段）。
   - 捕获异常并在失败时返回一个默认 JSON 字符串表示无法回答。
 
 ## 图节点管理工具
